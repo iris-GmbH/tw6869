@@ -71,7 +71,11 @@ MODULE_VERSION("0.3.3");
 #define TW_NAME "tw6869"
 #define TWINFO(FMT, ...)   DP_PRINT("I[" TW_NAME ":%s:%d] " FMT, __func__, __LINE__,##__VA_ARGS__)
 #define TWNOTICE(FMT, ...) DP_PRINT("N[" TW_NAME ":%s:%d] " FMT, __func__, __LINE__,##__VA_ARGS__)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
 #define TWWARN(FMT, ...)   { DP_PRINT("W[" TW_NAME ":%s:%d] " FMT, __func__, __LINE__,##__VA_ARGS__); pr_warning("[" TW_NAME ":%s:%d] " FMT, __func__, __LINE__,##__VA_ARGS__); }
+#else
+#define TWWARN(FMT, ...)   { DP_PRINT("W[" TW_NAME ":%s:%d] " FMT, __func__, __LINE__,##__VA_ARGS__); pr_warn("[" TW_NAME ":%s:%d] " FMT, __func__, __LINE__,##__VA_ARGS__); }
+#endif
 #define TWERR(FMT, ...)   printk( KERN_ERR "[" TW_NAME ":%s:%d] " FMT, __func__, __LINE__,##__VA_ARGS__)
 
 
@@ -386,6 +390,7 @@ static int ramdp_open(struct inode *inode, struct file *file)
 	return single_open(file, ramdp_show, NULL);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
 static const struct file_operations ramdp_fops = {
 	.owner	= THIS_MODULE,
 	.open	= ramdp_open,
@@ -393,7 +398,14 @@ static const struct file_operations ramdp_fops = {
 	.llseek	= seq_lseek,
 	.release= single_release,
 };
-
+#else
+static const struct proc_ops ramdp_fops = {
+	.proc_open	= ramdp_open,
+	.proc_read	= seq_read,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
+};
+#endif
 #endif /* TRACE_SIZE */
 
 /**********************************************************************/
@@ -1468,7 +1480,11 @@ static int tw6869_vch_register(struct tw6869_vch *vch)
 			    V4L2_CAP_STREAMING | V4L2_CAP_READWRITE;
 #endif
 	video_set_drvdata(vdev, vch);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
 	ret = video_register_device(vdev, VFL_TYPE_GRABBER, -1);
+#else
+	ret = video_register_device(vdev, VFL_TYPE_VIDEO, -1);
+#endif
 	if (!ret) {
 		return 0;
 	}
