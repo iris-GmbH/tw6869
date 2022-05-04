@@ -60,7 +60,6 @@ MODULE_AUTHOR("starterkit <info@starterkit.ru>");
 MODULE_LICENSE("GPL v2");
 MODULE_VERSION("0.3.3");
 
-
 #define CHECK_V_PB  /* drop frames on pb failures */
 #undef IMPL_AUDIO   /* not used/checked */
 #undef IRQ_DMA_STOP
@@ -138,6 +137,10 @@ MODULE_VERSION("0.3.3");
 	}
 #endif
 
+
+#define TW_WRITE_PAL_NTSC(DEV, REG, VAL_PAL, VAL_NTSC) \
+	tw_write(DEV, REG, (video_standard & V4L2_STD_625_50) ? VAL_PAL: VAL_NTSC)
+
 struct ramdp_handle_t {
 	uint8_t buf[TRACE_SIZE];
 	uint32_t len;
@@ -154,6 +157,20 @@ struct ramdp_handle_t {
 
 static ramdp;
 #endif
+
+/*
+ * This module parameter allows to specify the video standard expected on the
+ * input streams.
+ *
+ * the value is a v4l2_std_id type, each bit representing another video standard
+ * https://www.kernel.org/doc/html/v4.9/media/uapi/v4l/vidioc-enumstd.html#v4l2-std-id
+ *
+ * Default value for PAL/SECAM : 0x00ff06ff (V4L2_STD_625_50)
+ * Alternative for NTSC        : 0x0000f900 (V4L2_STD_525_60)
+ */
+static u64 video_standard = 0x00ff06ff;
+module_param(video_standard, ullong, 0444);
+MODULE_PARM_DESC(video_standard, "video standard expected on the video inputs (v4l2_std_id)");
 
 
 
@@ -292,6 +309,8 @@ struct tw6869_dev {
 };
 
 /**********************************************************************/
+
+static int tw6869_reset(struct tw6869_dev *dev);
 
 static inline void tw_write(struct tw6869_dev *dev, unsigned int reg, unsigned int val)
 {
@@ -770,7 +789,7 @@ static unsigned int tw6869_fields_map(struct tw6869_vch *vch)
 static void tw6869_vch_frame_period(struct tw6869_vch *vch,
 		struct v4l2_fract *frameperiod)
 {
-	if (vch->std & V4L2_STD_625_50) {
+	if ((vch->std & V4L2_STD_625_50) || (vch->std & V4L2_STD_525_60)) {
 		frameperiod->numerator = 1;
 		frameperiod->denominator = vch->fps;
 	} else {
@@ -1203,7 +1222,11 @@ static int tw6869_s_std(struct file *file, void *priv, v4l2_std_id std)
 	if (vb2_is_busy(&vch->queue))
 		return -EBUSY;
 
+	video_standard = (u64)std;
+	tw6869_reset(vch->dev);
+
 	vch->std = new_std;
+
 	tw6869_fill_pix_format(vch, &vch->format);
 	tw6869_vch_set_dma(vch);
 	return 0;
@@ -1429,7 +1452,7 @@ static int tw6869_vch_register(struct tw6869_vch *vch)
 	}
 
 	/* Fill in the initial format-related settings */
-	vch->std = V4L2_STD_625_50;
+	vch->std = video_standard;
 	vch->format.pixelformat = V4L2_PIX_FMT_UYVY;
 	tw6869_fill_pix_format(vch, &vch->format);
 	tw6869_vch_set_dma(vch);
@@ -1900,11 +1923,21 @@ static void dma_resync(struct timer_list *t)
 }
 
 
-
 static int tw6869_reset(struct tw6869_dev *dev)
 {
 	unsigned id;
 	u32 regDW;
+	TWINFO("tw6869_reset std:%08llx isPal?%d isNTSC?%d\n",
+		   video_standard,
+		   (video_standard & V4L2_STD_625_50 )?1:0, // PAL
+		   (video_standard & V4L2_STD_525_60)?1:0); // NTSC
+
+	if (!(video_standard & V4L2_STD_625_50)
+		&& !(video_standard & V4L2_STD_525_60)) {
+		TWINFO("expected either PAL or NTSC support\n");
+		dev_err(&dev->pdev->dev, "expected either PAL or NTSC support\n");
+		return -EINVAL;
+	}
 
 	/* Disable all DMA channels */
 	tw_write(dev, R32_DMA_CHANNEL_ENABLE, 0);
@@ -1923,7 +1956,7 @@ static int tw6869_reset(struct tw6869_dev *dev)
 	regDW = tw_read(dev, EP_REG_DATA);
 	dev_info(&dev->pdev->dev, "PCI_CFG[Posted 0x730]=0x%x\n", regDW);
 
-	//Trasnmit Non-Posted FC credit Status
+	//Transmit Non-Posted FC credit Status
 	tw_write(dev, EP_REG_ADDR, 0x734);   //
 	regDW = tw_read(dev, EP_REG_DATA );
 	dev_info(&dev->pdev->dev, "PCI_CFG[Non-Posted 0x734]=0x%x\n", regDW );
@@ -1939,20 +1972,35 @@ static int tw6869_reset(struct tw6869_dev *dev)
 	tw_write(dev, R32_SYS_SOFT_RST, 0x0F);
 	tw_read(dev, R32_SYS_SOFT_RST);
 
-	/* 625 lines, full D1 */
-	tw_write(dev, R32_VIDEO_CONTROL1, 0x001FE001);
+	/* video control p42, PAL: 625 lines, full D1, NTSC 525 lines, full D1 */
+	TW_WRITE_PAL_NTSC(dev, R32_VIDEO_CONTROL1, 0x001FE001, 0x00000001);
 
 	for(id = 0; id < TW_CH_MAX; id++)
 	{
-		//tw_write(dev, R8_STANDARD_REC(id), 0xFF);
-		tw_write(dev, R8_STANDARD_REC(id), 0x81); /* XXX PAL */
-		//tw_write(dev, R8_STANDARD_SEL(id), 0x0F);
-		tw_write(dev, R8_STANDARD_SEL(id), 0x09); /* XXX PAL */
-		tw_write(dev, R8_REG(0x107, id), 0x12); /* crop */
-		tw_write(dev, R8_REG(0x10B, id), 0xd0); /* 720 0x2d0 */
-		tw_write(dev, R8_REG(0x109, id), 0x20); /* 576/2 0x120 */
-		tw_write(dev, R8_VDELAY(id), 0x17);     /* VDelay */
-		tw_write(dev, R8_REG(0x10A, id), 0x06); /* HDelay */
+		/* standard recognition p75 */
+		TW_WRITE_PAL_NTSC(dev, R8_STANDARD_REC(id), 0x81, 0x82);
+
+		/* standard selection p74 */
+		TW_WRITE_PAL_NTSC(dev, R8_STANDARD_SEL(id), 0x09, 0x08);
+
+		/* cropping control registers, p72 */
+		TW_WRITE_PAL_NTSC(dev, R8_REG(0x107, id), 0x12, 0x02);
+
+		/* horizontal active register (low reg), p73 */
+		/* 720p 0x2d0 PAL + NTSC */
+		tw_write(dev, R8_REG(0x10B, id), 0xd0);
+
+		/* vertical active register (low reg), p72 */
+		/* PAL 576/2 0x120   NTSC 480/2 0xf0 */
+		TW_WRITE_PAL_NTSC(dev, R8_REG(0x109, id), 0x20, 0xf0);
+
+		/* vertical delay register (low reg), p72 */
+		TW_WRITE_PAL_NTSC(dev, R8_VDELAY(id),  0x17, 0x14);
+
+		/* horizontal delay register (low reg), p72 */
+		if (video_standard & V4L2_STD_PAL) {
+			tw_write(dev, R8_REG(0x10A, id), 0x06);
+		}
 	}
 	regDW = tw_read(dev, R32_PHASE_REF) & 0xFFFF0000u;
 	tw_write(dev, R32_PHASE_REF, regDW | 0xAAAA0000u); 
