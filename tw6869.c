@@ -2070,7 +2070,11 @@ static int tw6869_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 				return ret;
 
 		pci_set_master(pdev);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,1,0)
+		ret = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+#else
 		ret = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+#endif
 		if (ret) {
 				dev_err(&pdev->dev, "no suitable DMA available\n");
 				goto disable_pci;
